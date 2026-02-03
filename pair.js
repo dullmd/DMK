@@ -1163,11 +1163,10 @@ async function EmpirePair(number, res) {
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
   const logger = pino({ 
     level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug',
-    transport: {
-      target: 'pino-pretty',
-      options: {
-        colorize: true,
-        translateTime: 'SYS:standard'
+    timestamp: () => `,"time":"${new Date().toISOString()}"`,
+    formatters: {
+      level: (label) => {
+        return { level: label.toUpperCase() };
       }
     }
   });
@@ -1860,3 +1859,4 @@ process.on('unhandledRejection', (reason, promise) => {
 })();
 
 module.exports = router;
+
