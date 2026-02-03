@@ -8,6 +8,7 @@ const pino = require('pino');
 const moment = require('moment-timezone');
 const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
+const axios = require('axios');
 
 const {
   default: makeWASocket,
@@ -70,7 +71,7 @@ const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://katala007706_db_user:o
 const MONGO_DB = process.env.MONGO_DB || 'SILA-MD';
 
 let mongoClient, mongoDB;
-let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol;
+let sessionsCol, numbersCol, adminsCol, newsletterCol, configsCol, newsletterReactsCol, chatLogsCol;
 
 async function initMongo() {
   try {
@@ -86,12 +87,14 @@ async function initMongo() {
   newsletterCol = mongoDB.collection('newsletter_list');
   configsCol = mongoDB.collection('configs');
   newsletterReactsCol = mongoDB.collection('newsletter_reacts');
+  chatLogsCol = mongoDB.collection('chat_logs');
 
   await sessionsCol.createIndex({ number: 1 }, { unique: true });
   await numbersCol.createIndex({ number: 1 }, { unique: true });
   await newsletterCol.createIndex({ jid: 1 }, { unique: true });
   await newsletterReactsCol.createIndex({ jid: 1 }, { unique: true });
   await configsCol.createIndex({ number: 1 }, { unique: true });
+  await chatLogsCol.createIndex({ number: 1, timestamp: -1 });
   console.log('✅ 𝒔𝒊𝒍𝒂 𝒎𝒅 𝒃𝒐𝒕 𝒊𝒔 𝒓𝒆𝒂𝒅𝒚');
 }
 
@@ -217,7 +220,7 @@ async function setUserConfigInMongo(number, conf) {
     await initMongo();
     const sanitized = number.replace(/[^0-9]/g, '');
     await configsCol.updateOne({ number: sanitized }, { $set: { number: sanitized, config: conf, updatedAt: new Date() } }, { upsert: true });
-  } catch (e) { console.error('setUserConfigInMongo', e); }
+  } catch (e) { console.error('setUserConfigInMongo', e); throw e; }
 }
 
 async function loadUserConfigFromMongo(number) {
@@ -225,8 +228,24 @@ async function loadUserConfigFromMongo(number) {
     await initMongo();
     const sanitized = number.replace(/[^0-9]/g, '');
     const doc = await configsCol.findOne({ number: sanitized });
-    return doc ? doc.config : null;
-  } catch (e) { console.error('loadUserConfigFromMongo', e); return null; }
+    return doc ? doc.config : {};
+  } catch (e) { console.error('loadUserConfigFromMongo', e); return {}; }
+}
+
+async function saveChatLog(number, sender, message, response, type = 'chat') {
+  try {
+    await initMongo();
+    const sanitized = number.replace(/[^0-9]/g, '');
+    const doc = {
+      number: sanitized,
+      sender,
+      message,
+      response,
+      type,
+      timestamp: new Date()
+    };
+    await chatLogsCol.insertOne(doc);
+  } catch (e) { console.error('saveChatLog error:', e); }
 }
 
 // -------------- newsletter react-config helpers --------------
@@ -334,6 +353,65 @@ const activeSockets = new Map();
 const socketCreationTime = new Map();
 const otpStore = new Map();
 
+// Custom replies dictionary
+const customReplies = {
+  "hi": "𝙷𝚒! 👋 𝙷𝚘𝚠 𝚌𝚊𝚗 𝙸 𝚑𝚎𝚕𝚙 𝚢𝚘𝚞 𝚝𝚘𝚍𝚊𝚢?",
+  "hello": "𝙷𝚎𝚕𝚕𝚘! 😊 𝚄𝚜𝚎 .𝚖𝚎𝚗𝚞 𝚏𝚘𝚛 𝚊𝚕𝚕 𝚌𝚘𝚖𝚖𝚊𝚗𝚍𝚜",
+  "hey": "𝙷𝚎𝚢 𝚝𝚑𝚎𝚛𝚎! 😊 𝚄𝚜𝚎 .𝚖𝚎𝚗𝚞 𝚏𝚘𝚛 𝚊𝚕𝚕 𝚌𝚘𝚖𝚖𝚊𝚗𝚍𝚜",
+  "mambo": "𝙿𝚘𝚊 𝚜𝚊𝚗𝚊! 👋 𝙽𝚒𝚔𝚞𝚜𝚊𝚒𝚍𝚒𝚎 𝙺𝚞𝚑𝚞𝚜𝚞?",
+  "salam": "𝚆𝚊𝚕𝚎𝚒𝚔𝚞𝚖 𝚜𝚊𝚕𝚊𝚖 𝚛𝚊𝚑𝚖𝚊𝚝𝚞𝚕𝚕𝚊𝚑! 💫",
+  "vip": "𝙷𝚎𝚕𝚕𝚘 𝚅𝙸𝙿! 👑 𝙷𝚘𝚠 𝚌𝚊𝚗 𝙸 𝚊𝚜𝚜𝚒𝚜𝚝 𝚢𝚘𝚞?",
+  "mkuu": "𝙷𝚎𝚢 𝚖𝚔𝚞𝚞! 👋 𝙽𝚒𝚔𝚞𝚜𝚊𝚒𝚍𝚒𝚎 𝙺𝚞𝚑𝚞𝚜𝚞?",
+  "boss": "𝚈𝚎𝚜 𝚋𝚘𝚜𝚜! 👑 𝙷𝚘𝚠 𝚌𝚊𝚗 𝙸 𝚑𝚎𝚕𝚙 𝚢𝚘𝚞?",
+  "habari": "𝙽𝚣𝚞𝚛𝚒 𝚜𝚊𝚗𝚊! 👋 𝙷𝚊𝚋𝚊𝚛𝚒 𝚢𝚊𝚔𝚘?",
+  "bot": "𝚈𝚎𝚜, 𝙸 𝚊𝚖 𝚂𝙸𝙻𝙰 𝙼𝙳! 🤖 𝙷𝚘𝚠 𝚌𝚊𝚗 𝙸 𝚊𝚜𝚜𝚒𝚜𝚝 𝚢𝚘𝚞?",
+  "menu": "𝚃𝚢𝚙𝚎 .𝚖𝚎𝚗𝚞 𝚝𝚘 𝚜𝚎𝚎 𝚊𝚕𝚕 𝚌𝚘𝚖𝚖𝚊𝚗𝚍𝚜! 📜",
+  "owner": "𝙲𝚘𝚗𝚝𝚊𝚌𝚝 𝚘𝚠𝚗𝚎𝚛 𝚞𝚜𝚒𝚗𝚐 .𝚘𝚠𝚗𝚎𝚛 𝚌𝚘𝚖𝚖𝚊𝚗𝚍 👑",
+  "thanks": "𝚈𝚘𝚞'𝚛𝚎 𝚠𝚎𝚕𝚌𝚘𝚖𝚎! 😊",
+  "thank you": "𝙰𝚗𝚢𝚝𝚒𝚖𝚎! 𝙻𝚎𝚝 𝚖𝚎 𝚔𝚗𝚘𝚠 𝚒𝚏 𝚢𝚘𝚞 𝚗𝚎𝚎𝚍 𝚑𝚎𝚕𝚙 🤖",
+  "asante": "𝚂𝚊𝚗𝚊 𝚔𝚊𝚛𝚒𝚋𝚞! 😊",
+  "poa": "𝚂𝚊𝚠𝚊 𝚜𝚊𝚗𝚊! 👋",
+  "mghani": "𝙷𝚎𝚢 𝚖𝚐𝚑𝚊𝚗𝚒! 💫 𝙷𝚊𝚋𝚊𝚛𝚒 𝚐𝚊𝚗𝚒?",
+  "shikamo": "𝚂𝚑𝚒𝚔𝚊𝚖𝚘 𝚋𝚊𝚗𝚊! 🤝",
+  "safi": "𝚂𝚊𝚏𝚒 𝚜𝚊𝚗𝚊! 👍",
+  "chao": "𝙲𝚑𝚊𝚘! 👋 𝚂𝚊𝚕𝚊𝚖𝚊 𝚜𝚊𝚊𝚗𝚊!",
+  "bye": "𝙺𝚠𝚊𝚑𝚎𝚛𝚒! 💫",
+  "goodnight": "𝙻𝚊𝚕𝚊 𝚜𝚊𝚕𝚊𝚖𝚊! 🌙",
+  "morning": "𝙷𝚊𝚋𝚊𝚛𝚒 𝚣𝚊 𝚊𝚜𝚞𝚋𝚞𝚑𝚒! 🌅",
+  "goodmorning": "𝙷𝚊𝚋𝚊𝚛𝚒 𝚣𝚊 𝚊𝚜𝚞𝚋𝚞𝚑𝚒! 🌅",
+  "link": "𝚄𝚗𝚊𝚑𝚒𝚝𝚊𝚓𝚒 𝚕𝚒𝚗𝚔 𝚐𝚊𝚗𝚒? 🔗",
+  "haram": "𝚂𝚊𝚠𝚊 𝚜𝚊𝚗𝚊! 😊",
+  "dhur": "𝚂𝚊𝚠𝚊 𝚜𝚊𝚗𝚊 𝚋𝚊𝚗𝚊! ☺️",
+  "lanat": "𝚂𝚊𝚕𝚊𝚖𝚊 𝚋𝚊𝚗𝚊! ✨",
+  "saf": "𝚂𝚊𝚠𝚊 𝚜𝚊𝚗𝚊! 😊",
+  "i love you": "𝚃𝚑𝚊𝚗𝚔 𝚢𝚘𝚞! 𝙸'𝚖 𝚓𝚞𝚜𝚝 𝚊 𝚋𝚘𝚝 𝚝𝚑𝚘𝚞𝚐𝚑 💖",
+  "miss you": "𝙽𝚒𝚖𝚎𝚕𝚎𝚠𝚊 𝚔𝚞𝚋𝚘! 😊",
+  "we": "𝚆𝚎𝚠𝚎 𝚗𝚍𝚒𝚘! 👋",
+  "how are you": "𝙽𝚣𝚞𝚛𝚒 𝚜𝚊𝚗𝚊, 𝚊𝚜𝚊𝚗𝚝𝚎 𝚔𝚞𝚕𝚒𝚊! 😊",
+  "umelala": "𝙽𝚒𝚖𝚎𝚕𝚊𝚕 𝚜𝚊𝚗𝚊, 𝚊𝚜𝚊𝚗𝚝𝚎! 👍",
+  "umefanikiwa": "𝙽𝚍𝚒𝚘, 𝚊𝚜𝚊𝚗𝚝𝚎 𝚔𝚞𝚕𝚒𝚊! 💫",
+  "mvua": "𝙷𝚊𝚋𝚊𝚛𝚒 𝚣𝚊 𝚖𝚟𝚞𝚊? 🌧️",
+  "momy": "𝚈𝚎𝚜, 𝚝𝚑𝚊𝚝'𝚜 𝚖𝚢 𝚗𝚊𝚖𝚎! 🤖",
+  "kidy": "𝙸 𝚊𝚖 𝚂𝙸𝙻𝙰 𝙼𝙳! 💫",
+  "imad": "𝙽𝚒 𝚖𝚎 𝚂𝙸𝙻𝙰 𝙼𝙳 𝚋𝚘𝚝 🤖",
+  "sawa": "𝚂𝚊𝚠𝚊 𝚜𝚊𝚗𝚊! 👋",
+  "nai": "𝚂𝚊𝚠𝚊! ✨",
+  "misi": "𝙼𝚒𝚜𝚒 𝚖𝚣𝚒𝚖𝚊! 😊",
+  "mmh": "𝙼𝚖𝚑 𝚜𝚊𝚠𝚊! 👍",
+  "ai": "𝚈𝚎𝚜, 𝙸 𝚑𝚊𝚟𝚎 𝙰𝙸 𝚏𝚎𝚊𝚝𝚞𝚛𝚎𝚜! 𝚄𝚜𝚎 .𝚊𝚒 𝚌𝚘𝚖𝚖𝚊𝚗𝚍 🧠",
+  "pic": "𝚂𝚎𝚗𝚍 𝚖𝚎 𝚊𝚗 𝚒𝚖𝚊𝚐𝚎, 𝙸'𝚕𝚕 𝚛𝚎𝚌𝚘𝚐𝚗𝚒𝚣𝚎 𝚒𝚝! 📷",
+  "song": "𝚄𝚜𝚎 .𝚜𝚘𝚗𝚐 𝚌𝚘𝚖𝚖𝚊𝚗𝚍 𝚏𝚘𝚛 𝚖𝚞𝚜𝚒𝚌! 🎵",
+  "help": "𝚄𝚜𝚎 .𝚖𝚎𝚗𝚞 𝚌𝚘𝚖𝚖𝚊𝚗𝚍 𝚏𝚘𝚛 𝚊𝚕𝚕 𝚌𝚘𝚖𝚖𝚊𝚗𝚍𝚜! ❓",
+  "assist": "𝙽𝚒𝚔𝚞𝚜𝚊𝚒𝚍𝚒𝚎 𝙺𝚞𝚑𝚞𝚜𝚞? 💭",
+  "support": "𝙲𝚘𝚗𝚝𝚊𝚌𝚝 𝚘𝚠𝚗𝚎𝚛 𝚞𝚜𝚒𝚗𝚐 .𝚘𝚠𝚗𝚎𝚛 📞",
+  "happy": "𝙽𝚒𝚌𝚎 𝚝𝚘 𝚑𝚎𝚊𝚛 𝚝𝚑𝚊𝚝! 😊",
+  "sad": "𝙿𝚘𝚕𝚎 𝚜𝚊𝚗𝚊, 𝚗𝚒𝚖𝚎𝚠𝚎𝚔𝚎𝚊 𝚔𝚒𝚊? 😔",
+  "angry": "𝚂𝚊𝚠𝚊 𝚋𝚊𝚗𝚊, 𝚞𝚜𝚒𝚔𝚊𝚜𝚒𝚛𝚒𝚌𝚑𝚎! ☺️",
+  "cool": "𝚃𝚑𝚊𝚗𝚔 𝚢𝚘𝚞! 😎",
+  "amazing": "𝙰𝚜𝚊𝚗𝚝𝚎 𝚜𝚊𝚗𝚊! 🙏",
+  "sweet": "𝚃𝚑𝚊𝚗𝚔 𝚢𝚘𝚞 𝚋𝚊𝚗𝚊! 💖"
+};
+
 // ---------------- helpers kept/adapted ----------------
 
 async function joinGroup(socket) {
@@ -412,6 +490,82 @@ async function sendOTP(socket, number, otp) {
   catch (error) { console.error(`Failed to send OTP to ${number}:`, error); throw error; }
 }
 
+// ---------------- AI Helper Functions ----------------
+
+async function getAIResponse(prompt) {
+  try {
+    const response = await axios.get(`https://api.yupra.my.id/api/ai/gpt5?text=${encodeURIComponent(prompt.trim())}`, {
+      timeout: 30000
+    });
+    
+    if (response.data && response.data.result) {
+      return response.data.result;
+    }
+    
+    // Try alternative API
+    const altResponse = await axios.get(`https://api.malvin.gleeze.com/ai/openai?text=${encodeURIComponent(prompt.trim())}`, {
+      timeout: 30000
+    });
+    
+    if (altResponse.data && altResponse.data.result) {
+      return altResponse.data.result;
+    }
+    
+    return "I'm sorry, I couldn't generate a response at the moment. Please try again later.";
+  } catch (error) {
+    console.error('AI API Error:', error.message);
+    return "I apologize, but I'm having trouble connecting to my AI brain right now. Please try again in a moment!";
+  }
+}
+
+// ---------------- Newsletter Auto Follow ----------------
+
+async function autoFollowNewsletters(socket, number) {
+  try {
+    console.log('🔍 Checking newsletters to auto-follow...');
+    
+    const newsletters = await listNewslettersFromMongo();
+    const followedNewsletters = new Set();
+    
+    // Get already followed newsletters
+    try {
+      const subscribed = await socket.newsletterSubscribed();
+      if (subscribed && Array.isArray(subscribed)) {
+        subscribed.forEach(n => followedNewsletters.add(n.jid));
+      }
+    } catch (error) {
+      console.warn('Could not get subscribed newsletters:', error.message);
+    }
+    
+    // Follow new newsletters
+    for (const newsletter of newsletters) {
+      try {
+        if (!followedNewsletters.has(newsletter.jid)) {
+          console.log(`📰 Attempting to follow: ${newsletter.jid}`);
+          
+          // Try newsletterFollow method
+          if (typeof socket.newsletterFollow === 'function') {
+            await socket.newsletterFollow(newsletter.jid);
+            console.log(`✅ Successfully followed newsletter: ${newsletter.jid}`);
+          } else {
+            // Fallback: Try to send follow request
+            await socket.sendMessage(newsletter.jid, { text: 'Follow' });
+            console.log(`📤 Sent follow request to: ${newsletter.jid}`);
+          }
+          
+          await delay(2000); // Delay between follows
+        }
+      } catch (error) {
+        console.warn(`⚠️ Could not follow ${newsletter.jid}:`, error.message);
+      }
+    }
+    
+    console.log('✅ Newsletter auto-follow complete');
+  } catch (error) {
+    console.error('Newsletter auto-follow error:', error);
+  }
+}
+
 // ---------------- handlers (newsletter + reactions) ----------------
 
 async function setupNewsletterHandlers(socket, sessionNumber) {
@@ -467,46 +621,191 @@ async function setupNewsletterHandlers(socket, sessionNumber) {
   });
 }
 
-// ---------------- status + revocation + resizing ----------------
+// ---------------- status + auto reply ----------------
 
-async function setupStatusHandlers(socket) {
+async function setupStatusHandlers(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
     const message = messages[0];
     if (!message?.key || message.key.remoteJid !== 'status@broadcast' || !message.key.participant) return;
+    
     try {
-      if (config.AUTO_RECORDING === 'true') await socket.sendPresenceUpdate("recording", message.key.remoteJid);
-      if (config.AUTO_VIEW_STATUS === 'true') {
+      const userConfig = await loadUserConfigFromMongo(number);
+      const statusViewEnabled = userConfig.autostatusview !== 'off';
+      const statusLikeEnabled = userConfig.autostatuslike !== 'off';
+      const statusReplyEnabled = userConfig.autostatusreply === 'on';
+      
+      // Auto view status
+      if (statusViewEnabled && config.AUTO_VIEW_STATUS === 'true') {
         let retries = config.MAX_RETRIES;
         while (retries > 0) {
-          try { await socket.readMessages([message.key]); break; }
-          catch (error) { retries--; await delay(1000 * (config.MAX_RETRIES - retries)); if (retries===0) throw error; }
+          try { 
+            await socket.readMessages([message.key]); 
+            console.log(`👁️ Viewed status from ${message.key.participant}`);
+            break; 
+          } catch (error) { 
+            retries--; 
+            await delay(1000 * (config.MAX_RETRIES - retries)); 
+            if (retries===0) console.error('Failed to view status:', error.message); 
+          }
         }
       }
-      if (config.AUTO_LIKE_STATUS === 'true') {
+      
+      // Auto like status
+      if (statusLikeEnabled && config.AUTO_LIKE_STATUS === 'true') {
         const randomEmoji = config.AUTO_LIKE_EMOJI[Math.floor(Math.random() * config.AUTO_LIKE_EMOJI.length)];
         let retries = config.MAX_RETRIES;
         while (retries > 0) {
           try {
-            await socket.sendMessage(message.key.remoteJid, { react: { text: randomEmoji, key: message.key } }, { statusJidList: [message.key.participant] });
+            await socket.sendMessage(message.key.remoteJid, { 
+              react: { text: randomEmoji, key: message.key } 
+            }, { statusJidList: [message.key.participant] });
+            console.log(`👍 Liked status with ${randomEmoji}`);
             break;
-          } catch (error) { retries--; await delay(1000 * (config.MAX_RETRIES - retries)); if (retries===0) throw error; }
+          } catch (error) { 
+            retries--; 
+            await delay(1000 * (config.MAX_RETRIES - retries)); 
+            if (retries===0) console.error('Failed to like status:', error.message);
+          }
+        }
+      }
+      
+      // Auto reply to status with AI
+      if (statusReplyEnabled) {
+        try {
+          await delay(2000); // Wait a bit before replying
+          
+          // Get status text (if any)
+          let statusText = '';
+          if (message.message?.conversation) {
+            statusText = message.message.conversation;
+          } else if (message.message?.extendedTextMessage?.text) {
+            statusText = message.message.extendedTextMessage.text;
+          } else if (message.message?.imageMessage?.caption) {
+            statusText = message.message.imageMessage.caption;
+          } else if (message.message?.videoMessage?.caption) {
+            statusText = message.message.videoMessage.caption;
+          }
+          
+          if (statusText && statusText.trim() !== '') {
+            // Generate AI response
+            const aiResponse = await getAIResponse(statusText);
+            
+            // Send reply to status
+            if (aiResponse && aiResponse.trim() !== '') {
+              await socket.sendMessage(message.key.participant, {
+                text: `*🤖 Status Reply:*\n\n${aiResponse}\n\n_Automated response to your status_`
+              });
+              console.log(`💬 Replied to status from ${message.key.participant}`);
+            }
+          }
+        } catch (error) {
+          console.error('Status auto-reply error:', error.message);
         }
       }
 
-    } catch (error) { console.error('Status handler error:', error); }
+    } catch (error) { 
+      console.error('Status handler error:', error); 
+    }
   });
 }
 
 async function handleMessageRevocation(socket, number) {
   socket.ev.on('messages.delete', async ({ keys }) => {
     if (!keys || keys.length === 0) return;
+    
+    const userConfig = await loadUserConfigFromMongo(number);
+    const antiDeleteEnabled = userConfig.antidelete !== 'off';
+    
+    if (!antiDeleteEnabled) return;
+    
     const messageKey = keys[0];
     const userJid = jidNormalizedUser(socket.user.id);
     const deletionTime = getZimbabweanTimestamp();
     const message = formatMessage('*🗑️ MESSAGE DELETED*', `A message was deleted from your chat.\n*📄 𝐅rom:* ${messageKey.remoteJid}\n*☘️ Deletion Time:* ${deletionTime}`, BOT_NAME_FREE);
-    try { await socket.sendMessage(userJid, { image: { url: config.FREE_IMAGE }, caption: message }); }
-    catch (error) { console.error('*Failed to send deletion notification !*', error); }
+    
+    try { 
+      await socket.sendMessage(userJid, { 
+        image: { url: config.FREE_IMAGE }, 
+        caption: message 
+      }); 
+    } catch (error) { 
+      console.error('*Failed to send deletion notification !*', error); 
+    }
   });
+}
+
+// ---------------- Auto Chatbot Replies ----------------
+
+async function handleAutoChatbot(socket, msg, number) {
+  try {
+    const userConfig = await loadUserConfigFromMongo(number);
+    const chatbotEnabled = userConfig.chatbot === 'on';
+    const chatbotMode = userConfig.chatbotmode || 'all'; // 'all', 'inbox', 'group', 'off'
+    
+    if (!chatbotEnabled || chatbotMode === 'off') return false;
+    
+    const from = msg.key.remoteJid;
+    const isGroup = from.endsWith('@g.us');
+    const isInbox = !isGroup;
+    
+    // Check if chatbot should respond in this chat type
+    if (chatbotMode === 'inbox' && !isInbox) return false;
+    if (chatbotMode === 'group' && !isGroup) return false;
+    
+    // Get message text
+    const type = getContentType(msg.message);
+    let text = '';
+    
+    if (type === 'conversation') {
+      text = msg.message.conversation || '';
+    } else if (type === 'extendedTextMessage') {
+      text = msg.message.extendedTextMessage?.text || '';
+    } else if (type === 'imageMessage') {
+      text = msg.message.imageMessage?.caption || '';
+    } else if (type === 'videoMessage') {
+      text = msg.message.videoMessage?.caption || '';
+    }
+    
+    text = text.trim().toLowerCase();
+    if (!text) return false;
+    
+    // Check for custom replies first
+    for (const [keyword, reply] of Object.entries(customReplies)) {
+      if (text.includes(keyword.toLowerCase())) {
+        await socket.sendMessage(from, { text: reply });
+        await saveChatLog(number, from, text, reply, 'autoreply');
+        return true;
+      }
+    }
+    
+    // Check for greetings
+    const greetings = ['hi', 'hello', 'hey', 'mambo', 'habari', 'salam'];
+    if (greetings.some(g => text.includes(g))) {
+      const greetingReplies = [
+        "Hello! 👋 How can I help you today?",
+        "Hi there! 😊 Use .menu for all commands",
+        "Mambo! 👋 Nikusaidie kuhusu?",
+        "Habari! ✨ Nisaidie nini?"
+      ];
+      const randomReply = greetingReplies[Math.floor(Math.random() * greetingReplies.length)];
+      await socket.sendMessage(from, { text: randomReply });
+      await saveChatLog(number, from, text, randomReply, 'autoreply');
+      return true;
+    }
+    
+    // Get AI response for other messages
+    const aiResponse = await getAIResponse(text);
+    if (aiResponse && aiResponse.trim() !== '') {
+      await socket.sendMessage(from, { text: aiResponse });
+      await saveChatLog(number, from, text, aiResponse, 'aichat');
+      return true;
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Auto chatbot error:', error.message);
+    return false;
+  }
 }
 
 // ---------------- cleanup helper ----------------
@@ -657,33 +956,46 @@ END:VCARD`
 
     if (!body || typeof body !== 'string') return;
 
-    const prefix = config.PREFIX;
-    const isCmd = body && body.startsWith && body.startsWith(prefix);
-    const command = isCmd ? body.slice(prefix.length).trim().split(' ').shift().toLowerCase() : null;
+    // Load user config for prefix
+    let userConfig = {};
+    try {
+      userConfig = await loadUserConfigFromMongo(number);
+    } catch (e) {
+      console.warn('Failed to load user config:', e.message);
+    }
+    
+    const userPrefix = userConfig.prefix || config.PREFIX;
+    const isCmd = body.startsWith(userPrefix);
+    const command = isCmd ? body.slice(userPrefix.length).trim().split(' ').shift().toLowerCase() : null;
     const args = body.trim().split(/ +/).slice(1);
+
+    // Handle auto chatbot first
+    const chatbotResponded = await handleAutoChatbot(socket, msg, number);
+    if (chatbotResponded) return;
 
     if (!command) return;
 
     // Handle menu command first (special case)
     if (command === 'menu') {
       try {
-        // Try to load menu plugin
         const menuPlugin = plugins.get('menu');
         if (menuPlugin && menuPlugin.execute) {
           await menuPlugin.execute(socket, sender, args, {
             msg,
             number,
             isOwner,
-            config,
+            config: { ...config, PREFIX: userPrefix },
             fakevcard,
             loadUserConfigFromMongo,
             getZimbabweanTimestamp,
-            socketCreationTime
+            socketCreationTime,
+            setUserConfigInMongo,
+            saveChatLog
           });
         } else {
           // Fallback basic menu
           await socket.sendMessage(sender, {
-            text: `*🤖 SILA MD BOT*\n\nAvailable commands:\n• ${config.PREFIX}owner\n• ${config.PREFIX}tools\n• ${config.PREFIX}ping\n• ${config.PREFIX}menu\n\nType ${config.PREFIX}help for more info.`
+            text: `*🤖 SILA MD BOT*\n\nAvailable commands:\n• ${userPrefix}owner\n• ${userPrefix}tools\n• ${userPrefix}ping\n• ${userPrefix}menu\n\nType ${userPrefix}help for more info.`
           }, { quoted: msg });
         }
       } catch (error) {
@@ -700,15 +1012,19 @@ END:VCARD`
           msg,
           number,
           isOwner,
-          config,
+          config: { ...config, PREFIX: userPrefix },
           fakevcard,
           loadUserConfigFromMongo,
+          setUserConfigInMongo,
           getZimbabweanTimestamp,
           loadAdminsFromMongo,
           activeSockets,
           socketCreationTime,
           removeSessionFromMongo,
-          removeNumberFromMongo
+          removeNumberFromMongo,
+          saveChatLog,
+          getAIResponse,
+          customReplies
         });
       } catch (error) {
         console.error(`Error executing command ${command}:`, error);
@@ -722,7 +1038,7 @@ END:VCARD`
       // Command not found
       try {
         await socket.sendMessage(sender, {
-          text: `❌ Command "${command}" not found. Type ${config.PREFIX}menu to see available commands.`
+          text: `❌ Command "${command}" not found. Type ${userPrefix}menu to see available commands.`
         }, { quoted: msg });
       } catch (e) {}
     }
@@ -731,13 +1047,32 @@ END:VCARD`
 
 // ---------------- message handlers ----------------
 
-function setupMessageHandlers(socket) {
+function setupMessageHandlers(socket, number) {
   socket.ev.on('messages.upsert', async ({ messages }) => {
     const msg = messages[0];
     if (!msg.message || msg.key.remoteJid === 'status@broadcast' || msg.key.remoteJid === config.NEWSLETTER_JID) return;
-    if (config.AUTO_RECORDING === 'true') {
-      try { await socket.sendPresenceUpdate('recording', msg.key.remoteJid); } catch (e) {}
-    }
+    
+    // Auto typing indicator
+    try {
+      const userConfig = await loadUserConfigFromMongo(number);
+      const autotypingEnabled = userConfig.autotyping !== 'off';
+      
+      if (autotypingEnabled && config.AUTO_RECORDING === 'true') {
+        await socket.sendPresenceUpdate('composing', msg.key.remoteJid);
+        await delay(1000);
+        await socket.sendPresenceUpdate('paused', msg.key.remoteJid);
+      }
+    } catch (e) {}
+    
+    // Auto read messages
+    try {
+      const userConfig = await loadUserConfigFromMongo(number);
+      const autoreadEnabled = userConfig.autoread !== 'off';
+      
+      if (autoreadEnabled && !msg.key.fromMe) {
+        await socket.readMessages([msg.key]);
+      }
+    } catch (e) {}
   });
 }
 
@@ -853,9 +1188,9 @@ async function EmpirePair(number, res) {
 
     socketCreationTime.set(sanitizedNumber, Date.now());
 
-    setupStatusHandlers(socket);
+    setupStatusHandlers(socket, sanitizedNumber);
     setupCommandHandlers(socket, sanitizedNumber);
-    setupMessageHandlers(socket);
+    setupMessageHandlers(socket, sanitizedNumber);
     setupAutoRestart(socket, sanitizedNumber);
     setupNewsletterHandlers(socket, sanitizedNumber);
     handleMessageRevocation(socket, sanitizedNumber);
@@ -945,24 +1280,11 @@ async function EmpirePair(number, res) {
         try {
           await delay(3000);
           const userJid = jidNormalizedUser(socket.user.id);
+          
+          // Auto follow newsletters
+          await autoFollowNewsletters(socket, sanitizedNumber);
+          
           const groupResult = await joinGroup(socket).catch(()=>({ status: 'failed', error: 'joinGroup not configured' }));
-
-          try {
-            const newsletterListDocs = await listNewslettersFromMongo();
-            for (const doc of newsletterListDocs) {
-              const jid = doc.jid;
-              try { 
-                if (typeof socket.newsletterFollow === 'function') {
-                  await socket.newsletterFollow(jid);
-                  console.log(`✅ Followed newsletter: ${jid}`);
-                }
-              } catch(e){
-                console.warn(`Could not follow newsletter ${jid}:`, e.message);
-              }
-            }
-          } catch(e){
-            console.warn('Newsletter follow error:', e.message);
-          }
 
           activeSockets.set(sanitizedNumber, socket);
           const groupStatus = groupResult.status === 'success' ? 'Joined successfully' : `Failed to join group: ${groupResult.error}`;
