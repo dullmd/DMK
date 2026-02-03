@@ -44,7 +44,10 @@ module.exports = {
 • 📸 Status View: ${settings.autostatusview === 'on' ? '✅ ON' : '❌ OFF'}
 • 👍 Status Like: ${settings.autostatuslike === 'on' ? '✅ ON' : '❌ OFF'}
 • 🗑️ Anti-Delete: ${settings.antidelete === 'on' ? '✅ ON' : '❌ OFF'}
+• 🤖 Chatbot: ${settings.chatbot === 'on' ? '✅ ON' : '❌ OFF'}
+• 💬 Status Reply: ${settings.autostatusreply === 'on' ? '✅ ON' : '❌ OFF'}
 • 🎉 Welcome Msg: ${settings.welcome === 'on' ? '✅ ON' : '❌ OFF'}
+• 🌍 Chat Mode: ${settings.chatbotmode.toUpperCase()}
 
 *💡 Use commands below to toggle features*
 `.trim();
@@ -58,13 +61,16 @@ module.exports = {
           const buttons2 = [
             { buttonId: `${config.PREFIX}autostatusview`, buttonText: { displayText: "📸 Status View" }, type: 1 },
             { buttonId: `${config.PREFIX}autostatuslike`, buttonText: { displayText: "👍 Status Like" }, type: 1 },
-            { buttonId: `${config.PREFIX}antidelete`, buttonText: { displayText: "🗑️ Anti-Delete" }, type: 1 }
+            { buttonId: `${config.PREFIX}antidelete`, buttonText: { displayText: "🗑️ Anti-Delete" }, type: 1 },
+            { buttonId: `${config.PREFIX}autostatusreply`, buttonText: { displayText: "💬 Status Reply" }, type: 1 }
           ];
           
           const buttons3 = [
             { buttonId: `${config.PREFIX}welcome`, buttonText: { displayText: "🎉 Welcome Msg" }, type: 1 },
             { buttonId: `${config.PREFIX}setprefix`, buttonText: { displayText: "🔣 Set Prefix" }, type: 1 },
-            { buttonId: `${config.PREFIX}setname`, buttonText: { displayText: "🤖 Set Bot Name" }, type: 1 }
+            { buttonId: `${config.PREFIX}noprefix`, buttonText: { displayText: "🚀 No Prefix" }, type: 1 },
+            { buttonId: `${config.PREFIX}setname`, buttonText: { displayText: "🤖 Set Bot Name" }, type: 1 },
+            { buttonId: `${config.PREFIX}chatbot`, buttonText: { displayText: "🤖 Chatbot" }, type: 1 }
           ];
           
           await socket.sendMessage(sender, {
