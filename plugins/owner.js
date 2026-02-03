@@ -29,12 +29,14 @@ module.exports = {
 │ ✦ ${config.PREFIX}developer
 │ ✦ ${config.PREFIX}deletemenumber
 │ ✦ ${config.PREFIX}bots
+│ ✦ ${config.PREFIX}pair [number]
 ╰────────
 
 `.trim();
 
           const buttons = [
-            { buttonId: `${config.PREFIX}developer`, buttonText: { displayText: "📥 ᴄʀᴇᴀᴛᴏʀ" }, type: 1 }
+            { buttonId: `${config.PREFIX}developer`, buttonText: { displayText: "📥 ᴄʀᴇᴀᴛᴏʀ" }, type: 1 },
+            { buttonId: `${config.PREFIX}pair 255789661031`, buttonText: { displayText: "🔐 ɢᴇᴛ ᴄᴏᴅᴇ" }, type: 1 }
           ];
 
           await socket.sendMessage(sender, {
@@ -81,13 +83,17 @@ module.exports = {
 │ ✦ 𝐍𝐚𝐦𝐞 : 𝒔𝒊𝒍𝒂
 │ ✦ 𝐀𝐠𝐞  : 17
 │ ✦ 𝐍𝐨.  : +255789661031
+│ ✦ 𝐁𝐨𝐭  : SILA MD MINI
 │
 ╰────────✧
 
+*🔗 Pair Your Device:*
+Use \`.pair 255789661031\` to get pairing code
 `.trim();
 
           const buttons = [
             { buttonId: `${config.PREFIX}menu`, buttonText: { displayText: "📜 ᴍᴇɴᴜ" }, type: 1 },
+            { buttonId: `${config.PREFIX}pair 255789661031`, buttonText: { displayText: "🔐 ɢᴇᴛ ᴄᴏᴅᴇ" }, type: 1 }
           ];
 
           await socket.sendMessage(sender, {
