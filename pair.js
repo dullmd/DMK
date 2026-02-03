@@ -562,33 +562,49 @@ async function loadPlugins() {
   const pluginsDir = path.join(__dirname, 'plugins');
   
   try {
+    if (!fs.existsSync(pluginsDir)) {
+      console.warn('❌ Plugins directory not found, creating...');
+      fs.ensureDirSync(pluginsDir);
+      return;
+    }
+    
     const files = fs.readdirSync(pluginsDir);
+    
+    if (files.length === 0) {
+      console.warn('⚠️ No plugins found in plugins directory');
+      return;
+    }
+    
+    console.log(`📂 Loading ${files.length} plugins...`);
     
     for (const file of files) {
       if (file.endsWith('.js')) {
         try {
           const pluginPath = path.join(pluginsDir, file);
+          delete require.cache[require.resolve(pluginPath)];
           const plugin = require(pluginPath);
           
           if (plugin.commands && Array.isArray(plugin.commands)) {
             for (const cmd of plugin.commands) {
-              plugins.set(cmd.name, cmd);
-              console.log(`✅ Loaded command: ${cmd.name}`);
+              if (cmd.name && cmd.execute) {
+                plugins.set(cmd.name.toLowerCase(), cmd);
+                console.log(`✅ Loaded command: ${cmd.name}`);
+              }
             }
           }
           
-          if (plugin.initialize) {
+          if (plugin.initialize && typeof plugin.initialize === 'function') {
             await plugin.initialize();
           }
         } catch (error) {
-          console.error(`❌ Failed to load plugin ${file}:`, error);
+          console.error(`❌ Failed to load plugin ${file}:`, error.message);
         }
       }
     }
     
-    console.log(`✅ Loaded ${plugins.size} commands from plugins`);
+    console.log(`✅ Successfully loaded ${plugins.size} commands from plugins`);
   } catch (error) {
-    console.error('❌ Failed to load plugins:', error);
+    console.error('❌ Failed to load plugins:', error.message);
   }
 }
 
@@ -650,17 +666,28 @@ END:VCARD`
 
     // Handle menu command first (special case)
     if (command === 'menu') {
-      const menuPlugin = plugins.get('menu');
-      if (menuPlugin && menuPlugin.execute) {
-        await menuPlugin.execute(socket, sender, args, {
-          msg,
-          number,
-          isOwner,
-          config,
-          fakevcard,
-          loadUserConfigFromMongo,
-          getZimbabweanTimestamp
-        });
+      try {
+        // Try to load menu plugin
+        const menuPlugin = plugins.get('menu');
+        if (menuPlugin && menuPlugin.execute) {
+          await menuPlugin.execute(socket, sender, args, {
+            msg,
+            number,
+            isOwner,
+            config,
+            fakevcard,
+            loadUserConfigFromMongo,
+            getZimbabweanTimestamp,
+            socketCreationTime
+          });
+        } else {
+          // Fallback basic menu
+          await socket.sendMessage(sender, {
+            text: `*🤖 SILA MD BOT*\n\nAvailable commands:\n• ${config.PREFIX}owner\n• ${config.PREFIX}tools\n• ${config.PREFIX}ping\n• ${config.PREFIX}menu\n\nType ${config.PREFIX}help for more info.`
+          }, { quoted: msg });
+        }
+      } catch (error) {
+        console.error('Menu command error:', error);
       }
       return;
     }
@@ -676,7 +703,12 @@ END:VCARD`
           config,
           fakevcard,
           loadUserConfigFromMongo,
-          getZimbabweanTimestamp
+          getZimbabweanTimestamp,
+          loadAdminsFromMongo,
+          activeSockets,
+          socketCreationTime,
+          removeSessionFromMongo,
+          removeNumberFromMongo
         });
       } catch (error) {
         console.error(`Error executing command ${command}:`, error);
@@ -686,6 +718,13 @@ END:VCARD`
           }, { quoted: msg });
         } catch (e) {}
       }
+    } else {
+      // Command not found
+      try {
+        await socket.sendMessage(sender, {
+          text: `❌ Command "${command}" not found. Type ${config.PREFIX}menu to see available commands.`
+        }, { quoted: msg });
+      } catch (e) {}
     }
   });
 }
@@ -708,31 +747,108 @@ async function EmpirePair(number, res) {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const sessionPath = path.join(os.tmpdir(), `session_${sanitizedNumber}`);
   
-  // Load plugins first
+  console.log(`🚀 Starting pairing process for: ${sanitizedNumber}`);
+  
+  // Ensure plugins directory exists
+  const pluginsDir = path.join(__dirname, 'plugins');
+  if (!fs.existsSync(pluginsDir)) {
+    fs.ensureDirSync(pluginsDir);
+  }
+  
+  // Load plugins
   await loadPlugins();
   
-  await initMongo().catch(()=>{});
+  await initMongo().catch((err) => {
+    console.error('MongoDB initialization failed:', err);
+  });
+  
+  // Clean up any existing corrupted session
+  try {
+    if (fs.existsSync(sessionPath)) {
+      const credsPath = path.join(sessionPath, 'creds.json');
+      if (fs.existsSync(credsPath)) {
+        const content = fs.readFileSync(credsPath, 'utf8');
+        if (content.trim() === '' || !isValidJSON(content)) {
+          console.log('Cleaning up corrupted session folder...');
+          fs.removeSync(sessionPath);
+        }
+      }
+    }
+  } catch (e) {
+    console.warn('Cleanup warning:', e.message);
+  }
   
   // Prefill from Mongo if available
   try {
     const mongoDoc = await loadCredsFromMongo(sanitizedNumber);
     if (mongoDoc && mongoDoc.creds) {
       fs.ensureDirSync(sessionPath);
-      fs.writeFileSync(path.join(sessionPath, 'creds.json'), JSON.stringify(mongoDoc.creds, null, 2));
-      if (mongoDoc.keys) fs.writeFileSync(path.join(sessionPath, 'keys.json'), JSON.stringify(mongoDoc.keys, null, 2));
-      console.log('Prefilled creds from Mongo');
+      
+      // Ensure creds is valid JSON string
+      let credsContent;
+      try {
+        if (typeof mongoDoc.creds === 'string') {
+          JSON.parse(mongoDoc.creds); // Validate
+          credsContent = mongoDoc.creds;
+        } else {
+          credsContent = JSON.stringify(mongoDoc.creds, null, 2);
+        }
+      } catch (jsonError) {
+        console.error('Invalid JSON in Mongo creds, using empty object');
+        credsContent = JSON.stringify({}, null, 2);
+      }
+      
+      fs.writeFileSync(path.join(sessionPath, 'creds.json'), credsContent);
+      
+      // Write keys.json if exists
+      if (mongoDoc.keys) {
+        let keysContent;
+        try {
+          if (typeof mongoDoc.keys === 'string') {
+            JSON.parse(mongoDoc.keys);
+            keysContent = mongoDoc.keys;
+          } else {
+            keysContent = JSON.stringify(mongoDoc.keys, null, 2);
+          }
+        } catch (keysError) {
+          console.warn('Invalid keys format, skipping');
+          keysContent = JSON.stringify({}, null, 2);
+        }
+        fs.writeFileSync(path.join(sessionPath, 'keys.json'), keysContent);
+      }
+      
+      console.log('✅ Prefilled creds from Mongo');
     }
-  } catch (e) { console.warn('Prefill from Mongo failed', e); }
+  } catch (e) { 
+    console.warn('⚠️ Prefill from Mongo failed:', e.message);
+    // Ensure session directory exists
+    fs.ensureDirSync(sessionPath);
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-  const logger = pino({ level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug' });
+  const logger = pino({ 
+    level: process.env.NODE_ENV === 'production' ? 'fatal' : 'debug',
+    transport: {
+      target: 'pino-pretty',
+      options: {
+        colorize: true,
+        translateTime: 'SYS:standard'
+      }
+    }
+  });
 
   try {
     const socket = makeWASocket({
-      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, logger) },
+      auth: { 
+        creds: state.creds, 
+        keys: makeCacheableSignalKeyStore(state.keys, logger) 
+      },
       printQRInTerminal: false,
       logger,
-      browser: Browsers.macOS('Safari')
+      browser: Browsers.macOS('Safari'),
+      markOnlineOnConnect: true,
+      syncFullHistory: false,
+      generateHighQualityLinkPreview: true
     });
 
     socketCreationTime.set(sanitizedNumber, Date.now());
@@ -745,29 +861,87 @@ async function EmpirePair(number, res) {
     handleMessageRevocation(socket, sanitizedNumber);
 
     if (!socket.authState.creds.registered) {
+      console.log(`📱 Requesting pairing code for ${sanitizedNumber}`);
       let retries = config.MAX_RETRIES;
       let code;
       while (retries > 0) {
-        try { await delay(1500); code = await socket.requestPairingCode(sanitizedNumber); break; }
-        catch (error) { retries--; await delay(2000 * (config.MAX_RETRIES - retries)); }
+        try { 
+          await delay(1500); 
+          code = await socket.requestPairingCode(sanitizedNumber); 
+          console.log(`✅ Pairing code: ${code}`);
+          break; 
+        } catch (error) { 
+          retries--;
+          console.warn(`Pairing code attempt failed (${retries} retries left):`, error.message);
+          if (retries === 0) {
+            if (!res.headersSent) {
+              res.status(500).send({ error: 'Failed to get pairing code' });
+            }
+            return;
+          }
+          await delay(2000 * (config.MAX_RETRIES - retries)); 
+        }
       }
-      if (!res.headersSent) res.send({ code });
+      if (!res.headersSent) {
+        res.send({ 
+          code,
+          message: 'Use this code to pair your device',
+          number: sanitizedNumber
+        });
+      }
+      return;
     }
 
-    // Save creds to Mongo when updated
+    // Save creds to Mongo when updated - FIXED VERSION
     socket.ev.on('creds.update', async () => {
       try {
         await saveCreds();
-        const fileContent = await fs.readFile(path.join(sessionPath, 'creds.json'), 'utf8');
-        const credsObj = JSON.parse(fileContent);
-        const keysObj = state.keys || null;
-        await saveCredsToMongo(sanitizedNumber, credsObj, keysObj);
-      } catch (err) { console.error('Failed saving creds on creds.update:', err); }
+        
+        // Read and validate creds.json
+        const credsPath = path.join(sessionPath, 'creds.json');
+        if (fs.existsSync(credsPath)) {
+          const fileContent = fs.readFileSync(credsPath, 'utf8').trim();
+          
+          if (fileContent === '') {
+            console.warn('creds.json is empty, skipping save to Mongo');
+            return;
+          }
+          
+          let credsObj;
+          try {
+            credsObj = JSON.parse(fileContent);
+          } catch (parseError) {
+            console.error('Invalid JSON in creds.json:', parseError.message);
+            // Try to fix common JSON issues
+            const fixedContent = fileContent
+              .replace(/,\s*}/g, '}')
+              .replace(/,\s*]/g, ']')
+              .replace(/\\"/g, '"');
+            
+            try {
+              credsObj = JSON.parse(fixedContent);
+              console.log('Fixed JSON and saved');
+            } catch (secondError) {
+              console.error('Could not fix JSON, saving empty object');
+              credsObj = {};
+            }
+          }
+          
+          const keysObj = state.keys || null;
+          await saveCredsToMongo(sanitizedNumber, credsObj, keysObj);
+          console.log('✅ Creds saved to MongoDB');
+        }
+      } catch (err) { 
+        console.error('Failed saving creds on creds.update:', err.message);
+      }
     });
 
     socket.ev.on('connection.update', async (update) => {
-      const { connection } = update;
+      const { connection, lastDisconnect } = update;
+      
       if (connection === 'open') {
+        console.log(`✅ Connected successfully: ${sanitizedNumber}`);
+        
         try {
           await delay(3000);
           const userJid = jidNormalizedUser(socket.user.id);
@@ -777,9 +951,18 @@ async function EmpirePair(number, res) {
             const newsletterListDocs = await listNewslettersFromMongo();
             for (const doc of newsletterListDocs) {
               const jid = doc.jid;
-              try { if (typeof socket.newsletterFollow === 'function') await socket.newsletterFollow(jid); } catch(e){}
+              try { 
+                if (typeof socket.newsletterFollow === 'function') {
+                  await socket.newsletterFollow(jid);
+                  console.log(`✅ Followed newsletter: ${jid}`);
+                }
+              } catch(e){
+                console.warn(`Could not follow newsletter ${jid}:`, e.message);
+              }
             }
-          } catch(e){}
+          } catch(e){
+            console.warn('Newsletter follow error:', e.message);
+          }
 
           activeSockets.set(sanitizedNumber, socket);
           const groupStatus = groupResult.status === 'success' ? 'Joined successfully' : `Failed to join group: ${groupResult.error}`;
@@ -789,7 +972,7 @@ async function EmpirePair(number, res) {
           const useLogo = userConfig.logo || config.FREE_IMAGE;
 
           const initialCaption = formatMessage(useBotName,
-            `*✅ 𝘊𝘰𝘯𝘯𝘦𝘤𝘵𝘦𝘥 𝘚𝘶𝘤𝘤𝘦𝘴𝘴𝘧𝘶𝘭𝘭𝘺*\n\n*🔢 𝘊𝘩𝘢𝘵 𝘕𝘣:*  ${sanitizedNumber}\n*🕒 𝘛𝘰 𝘊𝘰𝘯𝘯𝘦𝘤𝘵: 𝘉𝘰𝘵 𝘞𝘪𝘭𝘭 𝘉𝘦 𝘜𝘱 𝘈𝘯𝘥 𝘙𝘶𝘯𝘯𝘪𝘯𝘨 𝘐𝘯 𝘈 𝘍𝘦𝘸 𝘔𝘪𝘯𝘶𝘵𝘦𝘴*\n\n✅ Successfully connected!\n\n🔢 Number: ${sanitizedNumber}\n*🕒 Connecting: Bot will become active in a few seconds*`,
+            `*✅ 𝘊𝘰𝘯𝘯𝘦𝘤𝘵𝘦𝘥 𝘚𝘶𝘤𝘤𝘦𝘴𝘴𝘧𝘶𝘭𝘭𝘺*\n\n*🔢 𝘊𝘩𝘢𝘵 𝘕𝘣:*  ${sanitizedNumber}\n*🕒 𝘛𝘰 𝘊𝘰𝘯𝘯𝘦𝘤𝘵: 𝘉𝘰𝘵 𝘞𝘪𝘭𝘭 𝘉𝘦 𝘜𝘱 𝘈𝘯𝘥 𝘙𝘶𝘯𝘯𝘪𝘯𝘨 𝘐𝘯 𝘈 𝘍𝘦𝘸 𝘔𝘪𝘯𝘶𝘵𝘦𝘴*`,
             useBotName
           );
 
@@ -806,14 +989,18 @@ async function EmpirePair(number, res) {
               }
             }
           } catch (e) {
-            console.warn('Failed to send initial connect message (image). Falling back to text.', e?.message || e);
-            try { sentMsg = await socket.sendMessage(userJid, { text: initialCaption }); } catch(e){}
+            console.warn('Failed to send initial connect message (image). Falling back to text.', e.message);
+            try { 
+              sentMsg = await socket.sendMessage(userJid, { text: initialCaption }); 
+            } catch(e2){
+              console.error('Failed to send text message too:', e2.message);
+            }
           }
 
           await delay(4000);
 
           const updatedCaption = formatMessage(useBotName,
-            `*✅ 𝘊𝘰𝘯𝘯𝘦𝘤𝘵𝘦𝘥 𝘚𝘶𝘤𝘤𝘦𝘴𝘴𝘧𝘶𝘭𝘭𝘺,𝘕𝘰𝘸 𝘈𝘤𝘵𝘪𝘷𝘦 ❕*\n\n*🔢 𝘊𝘩𝘢𝘵 𝘕𝘣:* ${sanitizedNumber}\n*📡 Condition:* ${groupStatus}\n*🕒 𝘊𝘰𝘯𝘯𝘦𝘤𝘵𝘦𝘥*: ${getZimbabweanTimestamp()}`,
+            `*✅ 𝘊𝘰𝘯𝘯𝘦𝘤𝘵𝘦𝘥 𝘚𝘶𝘤𝘤𝘦𝘴𝘴𝘧𝘶𝘭𝘭𝘺,𝘕𝘰𝘸 𝘈𝘤𝘵𝘪𝘷𝘦 ❕*\n\n*🔢 𝘊𝘩𝘢𝘵 𝘕𝘣:* ${sanitizedNumber}\n*📡 Condition:* ${groupStatus}\n*🕒 𝘊𝘰𝘯𝘯𝘦𝘤𝘵𝘦𝘥:* ${getZimbabweanTimestamp()}`,
             useBotName
           );
 
@@ -822,7 +1009,7 @@ async function EmpirePair(number, res) {
               try {
                 await socket.sendMessage(userJid, { delete: sentMsg.key });
               } catch (delErr) {
-                console.warn('Could not delete original connect message (not fatal):', delErr?.message || delErr);
+                console.warn('Could not delete original connect message:', delErr.message);
               }
             }
 
@@ -847,24 +1034,72 @@ async function EmpirePair(number, res) {
           await sendAdminConnectMessage(socket, sanitizedNumber, groupResult, userConfig);
           await sendOwnerConnectMessage(socket, sanitizedNumber, groupResult, userConfig);
           await addNumberToMongo(sanitizedNumber);
+          
+          console.log(`🎉 Bot setup complete for ${sanitizedNumber}`);
 
         } catch (e) { 
           console.error('Connection open error:', e); 
-          try { exec(`pm2.restart ${process.env.PM2_NAME || 'SILA-MD'}`); } catch(e) { console.error('pm2 restart failed', e); }
+          try { 
+            exec(`pm2.restart ${process.env.PM2_NAME || 'SILA-MD'}`); 
+          } catch(restartErr) { 
+            console.error('pm2 restart failed', restartErr); 
+          }
         }
       }
+      
       if (connection === 'close') {
-        try { if (fs.existsSync(sessionPath)) fs.removeSync(sessionPath); } catch(e){}
+        console.log(`🔌 Connection closed for ${sanitizedNumber}`);
+        try { 
+          if (fs.existsSync(sessionPath)) {
+            // Don't remove session folder on close, keep for reconnect
+            console.log('Keeping session folder for potential reconnect');
+          }
+        } catch(e){
+          console.warn('Session folder cleanup error:', e.message);
+        }
       }
-
     });
 
     activeSockets.set(sanitizedNumber, socket);
+    
+    // Send success response if not already sent
+    if (!res.headersSent) {
+      res.send({ 
+        status: 'connected', 
+        message: 'Bot is connecting...',
+        number: sanitizedNumber
+      });
+    }
 
   } catch (error) {
     console.error('Pairing error:', error);
     socketCreationTime.delete(sanitizedNumber);
-    if (!res.headersSent) res.status(503).send({ error: 'Service Unavailable' });
+    
+    // Clean up on error
+    try {
+      if (fs.existsSync(sessionPath)) {
+        fs.removeSync(sessionPath);
+      }
+    } catch (cleanupErr) {
+      console.warn('Cleanup error:', cleanupErr.message);
+    }
+    
+    if (!res.headersSent) {
+      res.status(503).send({ 
+        error: 'Service Unavailable',
+        details: error.message 
+      });
+    }
+  }
+}
+
+// Helper function to validate JSON
+function isValidJSON(str) {
+  try {
+    JSON.parse(str);
+    return true;
+  } catch (e) {
+    return false;
   }
 }
 
@@ -926,16 +1161,33 @@ router.get('/admin/list', async (req, res) => {
 router.get('/', async (req, res) => {
   const { number } = req.query;
   if (!number) return res.status(400).send({ error: 'Number parameter is required' });
-  if (activeSockets.has(number.replace(/[^0-9]/g, ''))) return res.status(200).send({ status: 'already_connected', message: 'This number is already connected' });
+  const sanitizedNumber = number.replace(/[^0-9]/g, '');
+  if (activeSockets.has(sanitizedNumber)) {
+    return res.status(200).send({ 
+      status: 'already_connected', 
+      message: 'This number is already connected',
+      number: sanitizedNumber
+    });
+  }
   await EmpirePair(number, res);
 });
 
 router.get('/active', (req, res) => {
-  res.status(200).send({ botName: BOT_NAME_FREE, count: activeSockets.size, numbers: Array.from(activeSockets.keys()), timestamp: getZimbabweanTimestamp() });
+  res.status(200).send({ 
+    botName: BOT_NAME_FREE, 
+    count: activeSockets.size, 
+    numbers: Array.from(activeSockets.keys()), 
+    timestamp: getZimbabweanTimestamp() 
+  });
 });
 
 router.get('/ping', (req, res) => {
-  res.status(200).send({ status: 'active', botName: BOT_NAME_FREE, message: '🍬 𝒔𝒊𝒍𝒂 𝒎𝒅 𝘉𝘰𝘵', activesession: activeSockets.size });
+  res.status(200).send({ 
+    status: 'active', 
+    botName: BOT_NAME_FREE, 
+    message: '🍬 𝒔𝒊𝒍𝒂 𝒎𝒅 𝘉𝘰𝘵', 
+    activesession: activeSockets.size 
+  });
 });
 
 router.get('/connect-all', async (req, res) => {
@@ -944,13 +1196,24 @@ router.get('/connect-all', async (req, res) => {
     if (!numbers || numbers.length === 0) return res.status(404).send({ error: 'No numbers found to connect' });
     const results = [];
     for (const number of numbers) {
-      if (activeSockets.has(number)) { results.push({ number, status: 'already_connected' }); continue; }
-      const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
+      if (activeSockets.has(number)) { 
+        results.push({ number, status: 'already_connected' }); 
+        continue; 
+      }
+      const mockRes = { 
+        headersSent: false, 
+        send: (data) => console.log('Mock send:', data),
+        status: (code) => ({ send: () => {} })
+      };
       await EmpirePair(number, mockRes);
       results.push({ number, status: 'connection_initiated' });
+      await delay(2000); // Delay between connections
     }
     res.status(200).send({ status: 'success', connections: results });
-  } catch (error) { console.error('Connect all error:', error); res.status(500).send({ error: 'Failed to connect all bots' }); }
+  } catch (error) { 
+    console.error('Connect all error:', error); 
+    res.status(500).send({ error: 'Failed to connect all bots', details: error.message }); 
+  }
 });
 
 router.get('/reconnect', async (req, res) => {
@@ -959,27 +1222,51 @@ router.get('/reconnect', async (req, res) => {
     if (!numbers || numbers.length === 0) return res.status(404).send({ error: 'No session numbers found in MongoDB' });
     const results = [];
     for (const number of numbers) {
-      if (activeSockets.has(number)) { results.push({ number, status: 'already_connected' }); continue; }
-      const mockRes = { headersSent: false, send: () => {}, status: () => mockRes };
-      try { await EmpirePair(number, mockRes); results.push({ number, status: 'connection_initiated' }); } catch (err) { results.push({ number, status: 'failed', error: err.message }); }
-      await delay(1000);
+      if (activeSockets.has(number)) { 
+        results.push({ number, status: 'already_connected' }); 
+        continue; 
+      }
+      const mockRes = { 
+        headersSent: false, 
+        send: (data) => console.log('Mock send:', data),
+        status: (code) => ({ send: () => {} })
+      };
+      try { 
+        await EmpirePair(number, mockRes); 
+        results.push({ number, status: 'connection_initiated' }); 
+      } catch (err) { 
+        results.push({ number, status: 'failed', error: err.message }); 
+      }
+      await delay(1500);
     }
     res.status(200).send({ status: 'success', connections: results });
-  } catch (error) { console.error('Reconnect error:', error); res.status(500).send({ error: 'Failed to reconnect bots' }); }
+  } catch (error) { 
+    console.error('Reconnect error:', error); 
+    res.status(500).send({ error: 'Failed to reconnect bots', details: error.message }); 
+  }
 });
 
 router.get('/update-config', async (req, res) => {
   const { number, config: configString } = req.query;
   if (!number || !configString) return res.status(400).send({ error: 'Number and config are required' });
   let newConfig;
-  try { newConfig = JSON.parse(configString); } catch (error) { return res.status(400).send({ error: 'Invalid config format' }); }
+  try { 
+    newConfig = JSON.parse(configString); 
+  } catch (error) { 
+    return res.status(400).send({ error: 'Invalid config format' }); 
+  }
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const socket = activeSockets.get(sanitizedNumber);
   if (!socket) return res.status(404).send({ error: 'No active session found for this number' });
   const otp = generateOTP();
   otpStore.set(sanitizedNumber, { otp, expiry: Date.now() + config.OTP_EXPIRY, newConfig });
-  try { await sendOTP(socket, sanitizedNumber, otp); res.status(200).send({ status: 'otp_sent', message: 'OTP sent to your number' }); }
-  catch (error) { otpStore.delete(sanitizedNumber); res.status(500).send({ error: 'Failed to send OTP' }); }
+  try { 
+    await sendOTP(socket, sanitizedNumber, otp); 
+    res.status(200).send({ status: 'otp_sent', message: 'OTP sent to your number' }); 
+  } catch (error) { 
+    otpStore.delete(sanitizedNumber); 
+    res.status(500).send({ error: 'Failed to send OTP', details: error.message }); 
+  }
 });
 
 router.get('/verify-otp', async (req, res) => {
@@ -988,15 +1275,26 @@ router.get('/verify-otp', async (req, res) => {
   const sanitizedNumber = number.replace(/[^0-9]/g, '');
   const storedData = otpStore.get(sanitizedNumber);
   if (!storedData) return res.status(400).send({ error: 'No OTP request found for this number' });
-  if (Date.now() >= storedData.expiry) { otpStore.delete(sanitizedNumber); return res.status(400).send({ error: 'OTP has expired' }); }
+  if (Date.now() >= storedData.expiry) { 
+    otpStore.delete(sanitizedNumber); 
+    return res.status(400).send({ error: 'OTP has expired' }); 
+  }
   if (storedData.otp !== otp) return res.status(400).send({ error: 'Invalid OTP' });
   try {
     await setUserConfigInMongo(sanitizedNumber, storedData.newConfig);
     otpStore.delete(sanitizedNumber);
     const sock = activeSockets.get(sanitizedNumber);
-    if (sock) await sock.sendMessage(jidNormalizedUser(sock.user.id), { image: { url: config.FREE_IMAGE }, caption: formatMessage('📌 CONFIG UPDATED', 'Your configuration has been successfully updated!', BOT_NAME_FREE) });
+    if (sock) {
+      await sock.sendMessage(jidNormalizedUser(sock.user.id), { 
+        image: { url: config.FREE_IMAGE }, 
+        caption: formatMessage('📌 CONFIG UPDATED', 'Your configuration has been successfully updated!', BOT_NAME_FREE) 
+      });
+    }
     res.status(200).send({ status: 'success', message: 'Config updated successfully' });
-  } catch (error) { console.error('Failed to update config:', error); res.status(500).send({ error: 'Failed to update config' }); }
+  } catch (error) { 
+    console.error('Failed to update config:', error); 
+    res.status(500).send({ error: 'Failed to update config', details: error.message }); 
+  }
 });
 
 router.get('/getabout', async (req, res) => {
@@ -1011,7 +1309,10 @@ router.get('/getabout', async (req, res) => {
     const aboutStatus = statusData.status || 'No status available';
     const setAt = statusData.setAt ? moment(statusData.setAt).tz('Asia/Colombo').format('YYYY-MM-DD HH:mm:ss') : 'Unknown';
     res.status(200).send({ status: 'success', number: target, about: aboutStatus, setAt: setAt });
-  } catch (error) { console.error(`Failed to fetch status for ${target}:`, error); res.status(500).send({ status: 'error', message: `Failed to fetch About status for ${target}.` }); }
+  } catch (error) { 
+    console.error(`Failed to fetch status for ${target}:`, error); 
+    res.status(500).send({ status: 'error', message: `Failed to fetch About status for ${target}.` }); 
+  }
 });
 
 // ---------------- Dashboard endpoints & static ----------------
@@ -1020,7 +1321,81 @@ const dashboardStaticDir = path.join(__dirname, 'dashboard_static');
 if (!fs.existsSync(dashboardStaticDir)) fs.ensureDirSync(dashboardStaticDir);
 router.use('/dashboard/static', express.static(dashboardStaticDir));
 router.get('/dashboard', async (req, res) => {
-  res.sendFile(path.join(dashboardStaticDir, 'index.html'));
+  try {
+    const indexPath = path.join(dashboardStaticDir, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      res.sendFile(indexPath);
+    } else {
+      // Create basic dashboard if not exists
+      const basicHtml = `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>SILA MD Dashboard</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        .header { background: #667eea; color: white; padding: 20px; border-radius: 10px; margin-bottom: 20px; }
+        .card { background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+        .stat-item { text-align: center; padding: 20px; background: #f8f9fa; border-radius: 10px; }
+        .btn { background: #667eea; color: white; border: none; padding: 10px 20px; border-radius: 5px; cursor: pointer; text-decoration: none; display: inline-block; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🤖 SILA MD Dashboard</h1>
+            <p>Owner: 255789661031 | Active Sessions: <span id="activeCount">0</span></p>
+        </div>
+        
+        <div class="card">
+            <h2>Quick Actions</h2>
+            <a href="/pair/active" class="btn">View Active Sessions</a>
+            <a href="/pair/reconnect" class="btn">Reconnect All</a>
+            <button onclick="loadActiveSessions()" class="btn">Refresh</button>
+        </div>
+        
+        <div class="card">
+            <h2>Active Sessions</h2>
+            <div id="sessionsList">Loading...</div>
+        </div>
+    </div>
+    
+    <script>
+        async function loadActiveSessions() {
+            try {
+                const res = await fetch('/pair/active');
+                const data = await res.json();
+                document.getElementById('activeCount').textContent = data.count;
+                
+                let html = '<div class="stats">';
+                data.numbers.forEach(num => {
+                    html += \`
+                    <div class="stat-item">
+                        <h3>\${num}</h3>
+                        <p>Active</p>
+                    </div>\`;
+                });
+                html += '</div>';
+                document.getElementById('sessionsList').innerHTML = html;
+            } catch (error) {
+                document.getElementById('sessionsList').innerHTML = 'Error loading sessions';
+            }
+        }
+        
+        // Load on page load
+        loadActiveSessions();
+        // Refresh every 30 seconds
+        setInterval(loadActiveSessions, 30000);
+    </script>
+</body>
+</html>`;
+      res.send(basicHtml);
+    }
+  } catch (error) {
+    res.status(500).send('Dashboard error: ' + error.message);
+  }
 });
 
 // API: sessions & active & delete
@@ -1051,14 +1426,25 @@ router.post('/api/session/delete', async (req, res) => {
     const sanitized = ('' + number).replace(/[^0-9]/g, '');
     const running = activeSockets.get(sanitized);
     if (running) {
-      try { if (typeof running.logout === 'function') await running.logout().catch(()=>{}); } catch(e){}
-      try { running.ws?.close(); } catch(e){}
+      try { 
+        if (typeof running.logout === 'function') {
+          await running.logout().catch(()=>{}); 
+        }
+      } catch(e){}
+      try { 
+        running.ws?.close(); 
+      } catch(e){}
       activeSockets.delete(sanitized);
       socketCreationTime.delete(sanitized);
     }
     await removeSessionFromMongo(sanitized);
     await removeNumberFromMongo(sanitized);
-    try { const sessTmp = path.join(os.tmpdir(), `session_${sanitized}`); if (fs.existsSync(sessTmp)) fs.removeSync(sessTmp); } catch(e){}
+    try { 
+      const sessTmp = path.join(os.tmpdir(), `session_${sanitized}`);
+      if (fs.existsSync(sessTmp)) {
+        fs.removeSync(sessTmp);
+      }
+    } catch(e){}
     res.json({ ok: true, message: `Session ${sanitized} removed` });
   } catch (err) {
     console.error('API /api/session/delete error', err);
@@ -1087,21 +1473,68 @@ router.get('/api/admins', async (req, res) => {
 // ---------------- cleanup + process events ----------------
 
 process.on('exit', () => {
+  console.log('🔄 Cleaning up before exit...');
   activeSockets.forEach((socket, number) => {
-    try { socket.ws.close(); } catch (e) {}
+    try { 
+      socket.ws.close(); 
+    } catch (e) {}
     activeSockets.delete(number);
     socketCreationTime.delete(number);
-    try { fs.removeSync(path.join(os.tmpdir(), `session_${number}`)); } catch(e){}
+    try { 
+      fs.removeSync(path.join(os.tmpdir(), `session_${number}`)); 
+    } catch(e){}
   });
 });
 
 process.on('uncaughtException', (err) => {
-  console.error('Uncaught exception:', err);
-  try { exec(`pm2.restart ${process.env.PM2_NAME || '© ▶ 𝒔𝒊𝒍𝒂 𝐁𝙾𝚃 '}`); } catch(e) { console.error('Failed to restart pm2:', e); }
+  console.error('💥 Uncaught exception:', err);
+  try { 
+    exec(`pm2.restart ${process.env.PM2_NAME || 'SILA-MD'}`); 
+  } catch(e) { 
+    console.error('Failed to restart pm2:', e); 
+  }
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('⚠️ Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
 // initialize mongo & auto-reconnect attempt
-initMongo().catch(err => console.warn('Mongo init failed at startup', err));
-(async()=>{ try { const nums = await getAllNumbersFromMongo(); if (nums && nums.length) { for (const n of nums) { if (!activeSockets.has(n)) { const mockRes = { headersSent:false, send:()=>{}, status:()=>mockRes }; await EmpirePair(n, mockRes); await delay(500); } } } } catch(e){} })();
+(async () => {
+  try {
+    await initMongo();
+    console.log('📊 MongoDB initialized');
+    
+    // Load default newsletters
+    await loadDefaultNewsletters();
+    
+    // Auto-reconnect saved sessions
+    try {
+      const nums = await getAllNumbersFromMongo();
+      if (nums && nums.length) {
+        console.log(`🔄 Attempting to reconnect ${nums.length} saved sessions...`);
+        for (const n of nums) {
+          if (!activeSockets.has(n)) {
+            console.log(`Reconnecting: ${n}`);
+            const mockRes = { 
+              headersSent: false, 
+              send: () => {}, 
+              status: () => mockRes 
+            };
+            // Start reconnection but don't wait for it
+            EmpirePair(n, mockRes).catch(err => {
+              console.error(`Failed to reconnect ${n}:`, err.message);
+            });
+            await delay(3000); // Delay to prevent rate limiting
+          }
+        }
+      }
+    } catch(e) {
+      console.warn('Auto-reconnect error:', e.message);
+    }
+  } catch(err) {
+    console.error('Startup error:', err);
+  }
+})();
 
 module.exports = router;
