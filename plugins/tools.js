@@ -35,6 +35,13 @@ module.exports = {
 │ ✦ ${config.PREFIX}paircode [number]
 ╰─────
 
+╭─ 📤 𝐒𝐓𝐀𝐓𝐔𝐒 𝐏𝐎𝐒𝐓𝐈𝐍𝐆
+│ ✦ ${config.PREFIX}statuspost [text/media]
+│ ✦ ${config.PREFIX}statusimg [image]
+│ ✦ ${config.PREFIX}statusvideo [video]
+│ ✦ ${config.PREFIX}statusaudio [audio]
+╰─────
+
 > More tools coming soon...
 
 `.trim();
@@ -42,7 +49,8 @@ module.exports = {
           const buttons = [
             { buttonId: `${config.PREFIX}menu`, buttonText: { displayText: "📜 ᴍᴇɴᴜ" }, type: 1 },
             { buttonId: `${config.PREFIX}settings`, buttonText: { displayText: "⚙️ sᴇᴛᴛɪɴɢs" }, type: 1 },
-            { buttonId: `${config.PREFIX}pair`, buttonText: { displayText: "🔐 ᴘᴀɪʀ" }, type: 1 }
+            { buttonId: `${config.PREFIX}pair`, buttonText: { displayText: "🔐 ᴘᴀɪʀ" }, type: 1 },
+            { buttonId: `${config.PREFIX}statuspost`, buttonText: { displayText: "📤 sᴛᴀᴛᴜs" }, type: 1 }
           ];
 
           await socket.sendMessage(sender, {
