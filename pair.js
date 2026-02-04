@@ -67,7 +67,7 @@ const config = {
 
 // ---------------- MONGO SETUP ----------------
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://sila_md:sila0022@sila.67mxtd7.mongodb.net/';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://sila_md:sila0022@sila.67mxtd7.mongodb.net/?appName=sila';
 const MONGO_DB = process.env.MONGO_DB || 'SILA-MD';
 
 let mongoClient, mongoDB;
@@ -1859,5 +1859,6 @@ process.on('unhandledRejection', (reason, promise) => {
 })();
 
 module.exports = router;
+
 
 
