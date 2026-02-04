@@ -39,6 +39,6 @@ module.exports = {
 };
 
 // ---------------- MONGO SETUP ----------------
-const MONGO_URI = process.env.MONGODB || "mongodb+srv://sila_md:sila0022@sila.67mxtd7.mongodb.net/?appName=sila";
+const MONGO_URI = process.env.MONGODB || "mongodb+srv://katala007706_db_user:obpVBC8xtDTEyUem@cluster0.6n0zr2v.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0";
 const MONGO_DB = process.env.MONGO_DB || 'SILA-MD';
 
