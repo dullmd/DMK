@@ -20,7 +20,7 @@ const {
   jidNormalizedUser,
   downloadContentFromMessage,
   DisconnectReason
-} = require('baileys');
+} = require('@whiskeysockets/baileys');
 
 // ---------------- CONFIG ----------------
 const BOT_NAME_FREE = '𝒔𝒊𝒍𝒂 𝒎𝒅 𝒎𝒊𝒏𝒊.𝒃𝒐𝒕';
@@ -67,7 +67,7 @@ const config = {
 
 // ---------------- MONGO SETUP ----------------
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://katala007706_db_user:obpVBC8xtDTEyUem@cluster0.6n0zr2v.mongodb.net/?appName=Cluster0';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://sila_md:sila0022@sila.67mxtd7.mongodb.net/';
 const MONGO_DB = process.env.MONGO_DB || 'SILA-MD';
 
 let mongoClient, mongoDB;
@@ -1859,4 +1859,5 @@ process.on('unhandledRejection', (reason, promise) => {
 })();
 
 module.exports = router;
+
 
